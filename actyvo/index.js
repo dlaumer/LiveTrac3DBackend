@@ -16,7 +16,7 @@ exports.handler = async (event) => {
     const featureServiceToken = process.env.FEATURE_SERVICE_TOKEN;
 
     // The positions API URL (update with your actual API endpoint)
-    const positionsApiUrl = 'https://out.stapp.actyvo.app/api/positions/latest?after=2025-03-18T15%3A00%3A00Z&gigId=ACTYVO_CNC&contestId=e99662f41b3248758e515f7f3c54b3a0&code=s30GrFkOnqpZyaSThrjbHMyhECsxkjyPmFUJDCMekM7gAzFuv9U_Ww==';
+    const positionsApiUrl = 'https://out.stapp.actyvo.app/api/positions/latest?after=2025-03-18T15%3A00%3A00Z&gigId=ACTYVO_CNC&contestId=e99662f41b3248758e515f7f3c54b3a0&code=';
 
     // Call the positions API using the API key in the header
     const response = await axios.get(positionsApiUrl, {
