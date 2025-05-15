@@ -1,5 +1,8 @@
 const axios = require('axios');
 const turf = require('@turf/turf');
+const path = require('path');
+const fs = require('fs');
+
 const factorCoords = 1e6;
 const factorDist = 1e1;
 
@@ -20,65 +23,20 @@ exports.handler = async (event) => {
     // Optional token for ArcGIS Feature Services
     const featureServiceToken = process.env.FEATURE_SERVICE_TOKEN;
 
-    const routeCoords = require('./routeSmallCSA.json');
+    // load the keyed JSON { idx: { lat, long, alt, dist, head } }
+    const rawRoute = JSON.parse(
+      fs.readFileSync(path.join(__dirname, 'route.json'), 'utf8')
+    );
 
-    // Function to snap a point (lng, lat) onto the route polyline using turf.nearestPointOnLine
-    function snapPointToRoute(lng, lat) {
-      const route = turf.lineString(routeCoords, { name: "route" });
-      const point = turf.point([Number(lng), Number(lat)]);
-      const snapped = turf.nearestPointOnLine(route, point);
-      const segIndex = snapped.properties.index;
-      const segment = routeCoords.slice(segIndex, segIndex + 2);
-      return {
-        snappedPoint: snapped.geometry.coordinates,
-        segment,
-        index: segIndex
-      };
-    }
+    // turn it into a sorted array of [lon, lat]
+    const routeCoords = Object
+      .keys(rawRoute)
+      .map(i => Number(i))
+      .sort((a, b) => a - b)
+      .map(i => [rawRoute[i].lat, rawRoute[i].long]);
 
-    function roundCoords(point) {
-      return [Math.round(point[0] * factorCoords) / factorCoords, Math.round(point[1] * factorCoords) / factorCoords];
-    }
-
-    function roundDist(dist) {
-      return Math.round(dist * factorDist) / factorDist;
-    }
-
-    function extractPathSection(pointA, indexA, pointB, indexB) {
-      if (indexA > indexB) {
-        [pointA, pointB] = [pointB, pointA];
-        [indexA, indexB] = [indexB, indexA];
-      }
-      const path = [roundCoords(pointA)];
-      const cumulative = [0];
-      let totalDistance = 0;
-
-      for (let i = indexA + 1; i <= indexB; i++) {
-        const next = routeCoords[i];
-        const segDist = turf.distance(
-          turf.point(path[path.length - 1]),
-          turf.point(next),
-          { units: "meters" }
-        );
-        totalDistance += segDist;
-        path.push(roundCoords(next));
-        cumulative.push(roundDist(totalDistance));
-      }
-
-      const lastDist = turf.distance(
-        turf.point(path[path.length - 1]),
-        turf.point(pointB),
-        { units: "meters" }
-      );
-      totalDistance += lastDist;
-      path.push(roundCoords(pointB));
-      cumulative.push(roundDist(totalDistance));
-
-      return {
-        path: turf.lineString(path),
-        cumulative
-      };
-    }
+    // build a Turf LineString on the fly
+    const line = turf.lineString(routeCoords);
 
     // --- Simulation Setup ---
     const simulationStart = new Date('2025-01-01T12:00:00Z');
@@ -87,33 +45,32 @@ exports.handler = async (event) => {
     const simulatedTime = new Date(simulationStart.getTime() + (now.getTime() % simulationDurationMs));
     console.log("Simulated Time:", simulatedTime.toISOString());
 
-    function getLatestPosition(riderData, simulatedTime) {
-      const timestamps = Object.keys(riderData);
-      let latest = timestamps[0];
-      for (const t of timestamps) {
-        if (new Date(t * 1000) <= simulatedTime) latest = t;
-        else break;
-      }
-      return { timestamp: riderData[latest].timestamp_iso, coords: riderData[latest].coordinates };
+    // Round to nearest half-minute for filename
+    const epochSec = Math.round(simulatedTime.getTime() / 1000);
+    const halfMin = 30;
+    const roundedTs = Math.round(epochSec / halfMin) * halfMin;
+    const filename = `${roundedTs}.json`;
+    const filePath = path.join(__dirname, 'simulation', filename);
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Snapshot file not found: ${filename}`);
     }
 
-    const simulatedData = require('./bike_race_simulation_1000_normal.json');
-    const positions = Object.keys(simulatedData.riders).map(rider => {
-      const pos = getLatestPosition(simulatedData.riders[rider], simulatedTime);
+    const snapshot = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const positions = Object.keys(snapshot.riders).map(rider => {
       return {
         userId: rider,
-        _ts: pos.timestamp,
+        _ts: snapshot.riders[rider].timestamp_iso,
         gigId: "SIMULATED_GIG",
         contestId: "SIMULATED_CONTEST",
         runId: "SIMULATED_RUN",
         speed: 0,
-        longitude: pos.coords[0],
-        latitude: pos.coords[1],
+        longitude: snapshot.riders[rider].coordinates[0],
+        latitude: snapshot.riders[rider].coordinates[1],
         accuracy: 5,
-        altitude: pos.coords[2],
+        altitude: snapshot.riders[rider].coordinates[2],
         heading: 0,
         distance: 0,
-        activityTy: "cycling"
+        activityType: "cycling"
       };
     });
 
@@ -121,23 +78,26 @@ exports.handler = async (event) => {
     const userIds = positions.map(p => p.userId);
     const uniqueUserIds = Array.from(new Set(userIds));
     const latestQueryUrl = `${latestServiceBaseUrl}/query`;
-    const queryParams = { where: "1=1", outFields: "*", f: "json" };
+    const queryParams = { where: "1=1", outFields: "OBJECTID,userId,ts,distance,routeIndex", f: "json" };
     if (featureServiceToken) queryParams.token = featureServiceToken;
     const queryResult = await axios.get(latestQueryUrl, { params: queryParams });
-    const userIdToObjectId = {};
+    const existingFeatures = {};
     (queryResult.data.features || []).forEach(feat => {
       if (feat.attributes?.userId) {
-        userIdToObjectId[feat.attributes.userId] = {
-          ts: feat.attributes.ts_string,
-          objectId: feat.attributes.FID,
-          attributes: feat.attributes
+        existingFeatures[feat.attributes.userId] = {
+          OBJECTID: feat.attributes.OBJECTID,
+          userId: feat.attributes.userId,
+          ts: feat.attributes.ts,
+          distance: feat.attributes.distance,
+          routeIndex: feat.attributes.routeIndex
         };
       }
     });
+    console.log(existingFeatures["rider_1"])
 
     // Delete old history if needed
     const runHistoryDeleteUrl = `${runHistoryServiceBaseUrlTruncate}/truncate`;
-    
+
     const config = { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } };
     // 1) Grab a token at runtime
     async function fetchArcGISToken() {
@@ -186,65 +146,89 @@ exports.handler = async (event) => {
       const f = {
         attributes: {
           userId: pos.userId,
-          ts: new Date(pos._ts),
-          ts_string: pos._ts,
+          tsDate: new Date(pos._ts),
+          ts: Math.floor(new Date(pos._ts).getTime() / 1000),
           gigId: pos.gigId,
           contestId: pos.contestId,
           runId: pos.runId,
           speed: pos.speed,
-          longitude: snapped.snappedPoint[0],
-          latitude: snapped.snappedPoint[1],
-          accuracy: pos.accuracy,
           altitude: pos.altitude,
-          heading: pos.heading,
-          distance: pos.distance,
-          activityTy: pos.activityTy,
-          routeIndex: snapped.index
+          accuracy: pos.accuracy,
+          activityType: pos.activityType,
+          longitude: snapped.coordinates[0],
+          latitude: snapped.coordinates[1],
+          heading: snapped.heading,
+          distance: snapped.distance,
+          routeIndex: parseInt(snapped.index, 10)
         },
         geometry: {
-          x: snapped.snappedPoint[0],
-          y: snapped.snappedPoint[1],
+          x: snapped.coordinates[0],
+          y: snapped.coordinates[1],
           z: pos.altitude,
           spatialReference: { wkid: 4326 }
         }
       };
 
-      if (userIdToObjectId[pos.userId]) {
-        const prev = userIdToObjectId[pos.userId];
-        if (prev.ts !== pos._ts) {
-          const section = extractPathSection(
-            [prev.attributes.longitude, prev.attributes.latitude],
-            prev.attributes.routeIndex,
-            [f.attributes.longitude, f.attributes.latitude],
-            f.attributes.routeIndex
-          );
-          const dt = new Date(pos._ts) - new Date(prev.ts);
+      if (existingFeatures[pos.userId]) {
+        const previousPos = existingFeatures[pos.userId];
+        if (previousPos.ts !== f.attributes.ts) {
 
-          prev.attributes.previousPos = null;
-          if (Math.abs(dt) > 3 * 60 * 1000) {
-            // dt is larger than 3 minutes
-            f.attributes.path = "";
-            f.attributes.cumulative = "";
-            f.attributes.previousPos = "";
-            f.attributes.speed = 0;
-          } else {
-            f.attributes.path = JSON.stringify(section.path);
-            f.attributes.cumulative = JSON.stringify(section.cumulative);
-            f.attributes.previousPos = JSON.stringify(prev.attributes);
-            f.attributes.speed = section.cumulative.slice(-1)[0] / dt * 3600;
-          }
 
-          //console.log(Math.max(f.attributes.previousPos.length, f.attributes.path.length, f.attributes.cumulative.length))
-          f.attributes.FID = prev.objectId;
+          f.attributes.previousDistance = previousPos.distance;
+          f.attributes.previousRouteIndex = previousPos.routeIndex;
+          f.attributes.previousTs = previousPos.ts;
+
+          // 2) compute speed [km/h] from delta-distance & delta-time
+          const dtMs = f.attributes.ts - previousPos.ts;
+          const dMeters = f.attributes.distance - previousPos.distance;
+          f.attributes.speed = dtMs > 0
+            ? (dMeters / (dtMs )) * 3.6   // m/s → km/h
+            : 0;
+          f.attributes.OBJECTID = previousPos.OBJECTID;
 
           featuresToUpdate.push(f);
-          featuresToAddRunHistory.push(f);
         }
       } else {
         featuresToAddLatest.push(f);
-        featuresToAddRunHistory.push(f);
       }
+      
+      featuresToAddRunHistory.push(f);
+
     });
+
+    /**
+     * Snap an arbitrary [lng,lat] to our pre-computed route.
+     * Returns:
+     *   - coordinates: [lng, lat] of the snapped point
+     *   - distance:     exact cumulative meters (from route.json)
+     *   - index:        integer index into route.json
+     *   - heading:      integer bearing at that segment (0–359°)
+     */
+    function snapPointToRoute(lng, lat) {
+
+      const point = turf.point([Number(lng), Number(lat)]);
+      const snapped = turf.nearestPointOnLine(line, point, { units: 'meters' });
+
+      const idx = snapped.properties.index;
+      const entry = rawRoute[idx];
+
+      return {
+        coordinates: snapped.geometry.coordinates,
+        distance: entry.dist,
+        index: idx,
+        heading: entry.head
+      };
+    }
+
+
+    function roundCoords(point) {
+      return [Math.round(point[0] * factorCoords) / factorCoords, Math.round(point[1] * factorCoords) / factorCoords];
+    }
+
+    function roundDist(dist) {
+      return Math.round(dist * factorDist) / factorDist;
+    }
+
 
     // --- Batching utilities ---
     function chunkArray(arr, size) {
