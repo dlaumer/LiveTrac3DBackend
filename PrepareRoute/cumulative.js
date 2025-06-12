@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 // usage: node calcCumulativeWithHeadingArray.js <input.json> [output.json]
-const [, , inFile = 'GR60.json', outFile = 'GR60_cumulative.json'] = process.argv;
+const [, , inFile = 'RouteLong.json', outFile = 'RouteLong_cumulative.json'] = process.argv;
 
 // constant to convert degrees → meters at the equator
 const DEG_TO_M = 111_319.9;
@@ -39,8 +39,10 @@ function computeBearing([lon1, lat1], [lon2, lat2]) {
 
 (async function() {
   try {
+    console.log(`Reading points from ${inFile}...`);
     const raw = await fs.promises.readFile(path.resolve(inFile), 'utf8');
     const pts = JSON.parse(raw);
+    console.log(`Read ${pts.length} points from ${inFile}`);
     let total = 0;
     const out = [];
     const seen = new Set();

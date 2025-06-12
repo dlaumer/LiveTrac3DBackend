@@ -28,13 +28,7 @@ exports.handler = async (event) => {
       fs.readFileSync(path.join(__dirname, 'route.json'), 'utf8')
     );
 
-    // turn it into a sorted array of [lon, lat]
-    const routeCoords = Object
-      .keys(rawRoute)
-      .map(i => Number(i))
-      .sort((a, b) => a - b)
-      .map(i => [rawRoute[i].lat, rawRoute[i].long]);
-
+    const routeCoords = rawRoute.map(pt => [pt.lat, pt.long]);
     // build a Turf LineString on the fly
     const line = turf.lineString(routeCoords);
 
@@ -142,12 +136,13 @@ exports.handler = async (event) => {
     const featuresToAddRunHistory = [];
 
     positions.forEach(pos => {
-      const snapped = snapPointToRoute(pos.longitude, pos.latitude);
+      const snapped = snapToWindow(pos.longitude, pos.latitude, p);
+      const time = roundDownToAbsoluteMinutes()
       const f = {
         attributes: {
           userId: pos.userId,
-          tsDate: new Date(pos._ts),
-          ts: Math.floor(new Date(pos._ts).getTime() / 1000),
+          tsDate: new Date(time * 1000),
+          ts: time,
           gigId: pos.gigId,
           contestId: pos.contestId,
           runId: pos.runId,
@@ -182,7 +177,7 @@ exports.handler = async (event) => {
           const dtMs = f.attributes.ts - previousPos.ts;
           const dMeters = f.attributes.distance - previousPos.distance;
           f.attributes.speed = dtMs > 0
-            ? (dMeters / (dtMs )) * 3.6   // m/s → km/h
+            ? (dMeters / (dtMs)) * 3.6   // m/s → km/h
             : 0;
           f.attributes.OBJECTID = previousPos.OBJECTID;
 
@@ -191,35 +186,66 @@ exports.handler = async (event) => {
       } else {
         featuresToAddLatest.push(f);
       }
-      
+
       featuresToAddRunHistory.push(f);
 
     });
 
+
+    import turf from '@turf/turf';
+
     /**
-     * Snap an arbitrary [lng,lat] to our pre-computed route.
-     * Returns:
-     *   - coordinates: [lng, lat] of the snapped point
-     *   - distance:     exact cumulative meters (from route.json)
-     *   - index:        integer index into route.json
-     *   - heading:      integer bearing at that segment (0–359°)
+     * Snap [lng,lat] to just the window [startIdx…endIdx] of your routeCoords.
+     *
+     * @param {number} lng
+     * @param {number} lat
+     * @param {number} routeIndex  index into your routeCoords
+     * @param {number} distance    distance along your routeCoords
      */
-    function snapPointToRoute(lng, lat) {
+    function snapToWindow(lng, lat, routeIndex) {
 
-      const point = turf.point([Number(lng), Number(lat)]);
-      const snapped = turf.nearestPointOnLine(line, point, { units: 'meters' });
+      const startIdx = Math.max(0, routeIndex - 100);
+      const endIdx = Math.min(routeCoords.length - 1, routeIndex + 100);
+      // 1) slice your coords array (inclusive of both ends)
+      const subCoords = routeCoords.slice(startIdx, endIdx + 1);
+      const subLine = turf.lineString(subCoords);
 
-      const idx = snapped.properties.index;
-      const entry = rawRoute[idx];
+      // 2) snap
+      const pt = turf.point([Number(lng), Number(lat)]);
+      const snapped = turf.nearestPointOnLine(subLine, pt, { units: 'meters' });
+
+      // 3) if it’s outside your radius, take the whole route
+      if (snapped.properties.dist > 200) {
+        const snapped = turf.nearestPointOnLine(line, pt, { units: 'meters' });
+        startIdx = 0;
+      };
+
+      // 4) map the returned index back to your full route
+      //    snapped.properties.index is the index *into* subCoords
+      const localIdx = snapped.properties.index;
+      const globalIdx = startIdx + localIdx;
+
+      const alongSubline = snapped.properties.location;  // in meters
+      const newDistance = rawRoute[startIdx].dist + alongSubline;
+
+      // 5) compute along-route distance & heading as before
+      const entry = rawRoute[globalIdx];
 
       return {
         coordinates: snapped.geometry.coordinates,
-        distance: entry.dist,
-        index: idx,
+        distanceToRoute: snapped.properties.dist,
+        distance: newDistance,
+        index: globalIdx,
         heading: entry.head
       };
     }
 
+    // Returns the total number of whole minutes since 1970-01-01T00:00:00Z,
+    // rounded down to the last full minute.
+    function roundDownToAbsoluteMinutes(date = new Date()) {
+      const msPerMinute = 60 * 1000;
+      return Math.floor(date.getTime() / msPerMinute) * 60;
+    }
 
     function roundCoords(point) {
       return [Math.round(point[0] * factorCoords) / factorCoords, Math.round(point[1] * factorCoords) / factorCoords];

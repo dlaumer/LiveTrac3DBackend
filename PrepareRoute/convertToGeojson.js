@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 // usage: node convertToGeoJSON.js <input.json> [output.geojson]
-const [,, inFile = 'RouteAC.json', outFile = 'RouteAC.geojson'] = process.argv;
+const [,, inFile = 'RouteLong.json', outFile = 'RouteLong.geojson'] = process.argv;
 
 (async () => {
   try {
